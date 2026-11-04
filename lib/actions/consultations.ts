@@ -1,17 +1,7 @@
 "use server"
 
-import { and, desc, eq, inArray, isNotNull } from "drizzle-orm"
 import { revalidatePath } from "next/cache"
-import { getDb } from "@/lib/db"
-import {
-  profiles,
-  consultationRequests,
-  payments,
-  patients,
-  dietPlans,
-  meals,
-  mealItems,
-} from "@/lib/db/schema"
+import { createClient } from "@/lib/supabase/server"
 import { toActionError } from "@/server/core/errors"
 import { fail, ok } from "@/server/core/result"
 import { formDataToObject, parseWithSchema } from "@/server/core/validation"
@@ -41,40 +31,24 @@ const reviewPaymentSchema = z.object({
 
 const updateConsultationSchema = z.object({
   id: z.string().uuid(),
-  status: z.enum(["pending", "payment_pending", "payment_confirmed", "approved", "rejected", "cancelled"]),
+  status: z.enum(["pending", "awaiting_payment", "paid", "approved", "rejected", "cancelled"]),
   notes: z.string().trim().max(1000).optional().or(z.literal("")),
 })
 
-/** Lista nutricionistas activos para o cliente escolher */
 export async function listActiveNutritionists() {
   try {
-    const db = getDb()
-    const rows = await db
-      .select({
-        id: profiles.id,
-        fullName: profiles.fullName,
-        email: profiles.email,
-        clinicName: profiles.clinicName,
-        phone: profiles.phone,
-        paymentPhone: profiles.paymentPhone,
-        paymentInstructions: profiles.paymentInstructions,
-        avatarUrl: profiles.avatarUrl,
-      })
-      .from(profiles)
-      .where(and(eq(profiles.role, "nutritionist"), eq(profiles.isActive, true)))
-      .orderBy(profiles.fullName)
+    const supabase = await createClient()
+    const { data, error } = await supabase
+      .from("profiles")
+      .select(
+        "id, full_name, email, clinic_name, phone, payment_phone, payment_instructions, avatar_url",
+      )
+      .eq("role", "nutritionist")
+      .eq("is_active", true)
+      .order("full_name")
 
-    const data = rows.map((r) => ({
-      id: r.id,
-      full_name: r.fullName,
-      email: r.email,
-      clinic_name: r.clinicName,
-      phone: r.phone,
-      payment_phone: r.paymentPhone,
-      payment_instructions: r.paymentInstructions,
-      avatar_url: r.avatarUrl,
-    }))
-    return ok(data)
+    if (error) return fail({ code: "DATABASE_ERROR", message: error.message })
+    return ok(data ?? [])
   } catch (error) {
     return fail(toActionError(error))
   }
@@ -87,35 +61,28 @@ export async function requestConsultation(formData: FormData) {
       return fail({ code: "UNAUTHORIZED", message: "Apenas clientes podem solicitar consulta." })
     }
 
+    const supabase = await createClient()
     const input = parseWithSchema(requestConsultationSchema, formDataToObject(formData))
-    const db = getDb()
 
-    const notesParts = [input.reason, input.notes].filter((x) => x && String(x).trim())
-    const notes = notesParts.length ? notesParts.join(" | ") : null
-
-    const [row] = await db
-      .insert(consultationRequests)
-      .values({
-        clientUserId: profile.id,
-        nutritionistId: input.nutritionist_id,
-        preferredDate: input.preferred_date || null,
-        notes,
+    const { data, error } = await supabase
+      .from("consultation_requests")
+      .insert({
+        client_user_id: profile.id,
+        nutritionist_id: input.nutritionist_id,
+        reason: input.reason || null,
+        preferred_date: input.preferred_date || null,
+        notes: input.notes || null,
         status: "pending",
       })
-      .returning()
+      .select()
+      .single()
+
+    if (error) return fail({ code: "DATABASE_ERROR", message: error.message })
 
     revalidatePath("/cliente")
     revalidatePath("/cliente/consultas")
     revalidatePath("/dashboard/pagamentos")
-    return ok({
-      id: row.id,
-      client_user_id: row.clientUserId,
-      nutritionist_id: row.nutritionistId,
-      preferred_date: row.preferredDate,
-      notes: row.notes,
-      status: row.status,
-      created_at: row.createdAt,
-    })
+    return ok(data)
   } catch (error) {
     return fail(toActionError(error))
   }
@@ -128,90 +95,232 @@ export async function submitPaymentProof(formData: FormData) {
       return fail({ code: "UNAUTHORIZED", message: "Apenas clientes podem enviar comprovativo." })
     }
 
+    const supabase = await createClient()
     const input = parseWithSchema(submitPaymentSchema, formDataToObject(formData))
-    const db = getDb()
 
     const amountNum =
-      input.amount && String(input.amount).trim() !== ""
-        ? Number.parseFloat(String(input.amount).replace(",", "."))
+      input.amount && input.amount.trim() !== ""
+        ? Number.parseFloat(input.amount.replace(",", "."))
         : null
 
-    const [payment] = await db
-      .insert(payments)
-      .values({
-        consultationRequestId: input.consultation_request_id || null,
-        clientUserId: profile.id,
-        nutritionistId: input.nutritionist_id,
-        amount: amountNum != null && Number.isFinite(amountNum) ? String(amountNum) : null,
-        proofText: input.proof_text,
-        paymentPhone: input.payment_phone || null,
+    const { data: payment, error } = await supabase
+      .from("payments")
+      .insert({
+        consultation_request_id: input.consultation_request_id || null,
+        client_user_id: profile.id,
+        nutritionist_id: input.nutritionist_id,
+        amount: amountNum,
+        proof_text: input.proof_text,
+        payment_phone: input.payment_phone || null,
         status: "submitted",
       })
-      .returning()
+      .select()
+      .single()
+
+    if (error) return fail({ code: "DATABASE_ERROR", message: error.message })
 
     if (input.consultation_request_id) {
-      await db
-        .update(consultationRequests)
-        .set({ status: "payment_pending", updatedAt: new Date() })
-        .where(eq(consultationRequests.id, input.consultation_request_id))
+      await supabase
+        .from("consultation_requests")
+        .update({ status: "awaiting_payment" })
+        .eq("id", input.consultation_request_id)
+        .eq("client_user_id", profile.id)
     }
 
     revalidatePath("/cliente")
     revalidatePath("/cliente/pagamentos")
     revalidatePath("/dashboard/pagamentos")
-    return ok({
-      id: payment.id,
-      status: payment.status,
-      amount: payment.amount,
-      proof_text: payment.proofText,
-      created_at: payment.createdAt,
-    })
+    return ok(payment)
   } catch (error) {
     return fail(toActionError(error))
   }
 }
 
+async function attachProfiles<T extends Record<string, unknown>>(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  rows: T[],
+  clientKey: string,
+  nutritionistKey: string,
+) {
+  const ids = new Set<string>()
+  for (const row of rows) {
+    const c = row[clientKey]
+    const n = row[nutritionistKey]
+    if (typeof c === "string") ids.add(c)
+    if (typeof n === "string") ids.add(n)
+  }
+  if (ids.size === 0) {
+    return rows.map((r) => ({ ...r, client: null, nutritionist: null }))
+  }
+
+  const { data: profiles } = await supabase
+    .from("profiles")
+    .select("id, full_name, email, phone, clinic_name, payment_phone, payment_instructions")
+    .in("id", [...ids])
+
+  const map = new Map((profiles ?? []).map((p) => [p.id, p]))
+
+  return rows.map((row) => {
+    const cid = row[clientKey]
+    const nid = row[nutritionistKey]
+    return {
+      ...row,
+      client: typeof cid === "string" ? map.get(cid) ?? null : null,
+      nutritionist: typeof nid === "string" ? map.get(nid) ?? null : null,
+    }
+  })
+}
+
+/**
+ * Cria ou reutiliza paciente para este cliente + nutricionista (sem duplicar).
+ */
+async function ensurePatientForClient(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  nutritionistId: string,
+  clientUserId: string,
+  consultationId?: string | null,
+) {
+  const { data: existingByClient } = await supabase
+    .from("patients")
+    .select("id")
+    .eq("nutritionist_id", nutritionistId)
+    .eq("client_user_id", clientUserId)
+    .maybeSingle()
+
+  if (existingByClient?.id) {
+    if (consultationId) {
+      await supabase
+        .from("consultation_requests")
+        .update({ patient_id: existingByClient.id, status: "approved" })
+        .eq("id", consultationId)
+    }
+    return existingByClient.id as string
+  }
+
+  const { data: clientProfile } = await supabase
+    .from("profiles")
+    .select("id, full_name, email, phone")
+    .eq("id", clientUserId)
+    .maybeSingle()
+
+  const name =
+    clientProfile?.full_name?.trim() || clientProfile?.email?.split("@")[0] || "Cliente"
+  const email = clientProfile?.email || null
+
+  if (email) {
+    const { data: byEmail } = await supabase
+      .from("patients")
+      .select("id")
+      .eq("nutritionist_id", nutritionistId)
+      .eq("email", email)
+      .maybeSingle()
+
+    if (byEmail?.id) {
+      await supabase
+        .from("patients")
+        .update({
+          client_user_id: clientUserId,
+          name,
+          phone: clientProfile?.phone || null,
+        })
+        .eq("id", byEmail.id)
+
+      if (consultationId) {
+        await supabase
+          .from("consultation_requests")
+          .update({ patient_id: byEmail.id, status: "approved" })
+          .eq("id", consultationId)
+      }
+      return byEmail.id as string
+    }
+  }
+
+  const { data: created, error } = await supabase
+    .from("patients")
+    .insert({
+      nutritionist_id: nutritionistId,
+      client_user_id: clientUserId,
+      name,
+      email,
+      phone: clientProfile?.phone || null,
+      status: "active",
+      notes: "Criado automaticamente após confirmação de pagamento.",
+    })
+    .select("id")
+    .single()
+
+  if (error) {
+    console.error("ensurePatientForClient:", error.message)
+    throw error
+  }
+
+  if (consultationId && created?.id) {
+    await supabase
+      .from("consultation_requests")
+      .update({ patient_id: created.id, status: "approved" })
+      .eq("id", consultationId)
+  }
+
+  return created.id as string
+}
+
 export async function listMyConsultationRequests() {
   try {
     const profile = await getProfile()
-    if (!profile) {
-      return fail({ code: "UNAUTHORIZED", message: "Não autenticado." })
-    }
+    if (!profile) return fail({ code: "UNAUTHORIZED", message: "Não autenticado." })
 
+    const { getDb } = await import("@/lib/db")
+    const { consultationRequests, profiles } = await import("@/lib/db/schema")
+    const { desc, eq } = await import("drizzle-orm")
     const db = getDb()
-    const base = db
-      .select({
-        req: consultationRequests,
-        nutriName: profiles.fullName,
-        nutriClinic: profiles.clinicName,
-      })
-      .from(consultationRequests)
-      .leftJoin(profiles, eq(consultationRequests.nutritionistId, profiles.id))
-      .orderBy(desc(consultationRequests.createdAt))
 
     let rows
     if (profile.role === "client") {
-      rows = await base.where(eq(consultationRequests.clientUserId, profile.id))
+      rows = await db
+        .select()
+        .from(consultationRequests)
+        .where(eq(consultationRequests.clientUserId, profile.id))
+        .orderBy(desc(consultationRequests.createdAt))
     } else if (profile.role === "nutritionist") {
-      rows = await base.where(eq(consultationRequests.nutritionistId, profile.id))
+      rows = await db
+        .select()
+        .from(consultationRequests)
+        .where(eq(consultationRequests.nutritionistId, profile.id))
+        .orderBy(desc(consultationRequests.createdAt))
     } else {
-      rows = await base
+      rows = await db
+        .select()
+        .from(consultationRequests)
+        .orderBy(desc(consultationRequests.createdAt))
     }
 
-    const data = rows.map((r) => ({
-      id: r.req.id,
-      status: r.req.status,
-      reason: r.req.notes,
-      preferred_date: r.req.preferredDate,
-      notes: r.req.notes,
-      created_at: r.req.createdAt,
-      nutritionist_id: r.req.nutritionistId,
-      client_user_id: r.req.clientUserId,
-      nutritionist: r.nutriName
-        ? { full_name: r.nutriName, clinic_name: r.nutriClinic }
-        : null,
-    }))
-    return ok(data)
+    const profileRows = await db.select().from(profiles)
+    const byId = new Map(profileRows.map((p) => [p.id, p]))
+
+    const enriched = rows.map((r) => {
+      const client = byId.get(r.clientUserId)
+      const nutritionist = byId.get(r.nutritionistId)
+      return {
+        id: r.id,
+        status: r.status,
+        reason: r.notes,
+        preferred_date: r.preferredDate,
+        preferred_time: r.preferredTime,
+        notes: r.notes,
+        created_at:
+          r.createdAt instanceof Date ? r.createdAt.toISOString() : String(r.createdAt ?? ""),
+        client_user_id: r.clientUserId,
+        nutritionist_id: r.nutritionistId,
+        client: client
+          ? { full_name: client.fullName, email: client.email, phone: client.phone }
+          : null,
+        nutritionist: nutritionist
+          ? { full_name: nutritionist.fullName, email: nutritionist.email, phone: nutritionist.phone }
+          : null,
+      }
+    })
+
+    return ok(enriched)
   } catch (error) {
     return fail(toActionError(error))
   }
@@ -220,114 +329,61 @@ export async function listMyConsultationRequests() {
 export async function listMyPayments() {
   try {
     const profile = await getProfile()
-    if (!profile) {
-      return fail({ code: "UNAUTHORIZED", message: "Não autenticado." })
-    }
+    if (!profile) return fail({ code: "UNAUTHORIZED", message: "Não autenticado." })
 
+    const { getDb } = await import("@/lib/db")
+    const { payments, profiles } = await import("@/lib/db/schema")
+    const { desc, eq } = await import("drizzle-orm")
     const db = getDb()
-    const base = db
-      .select({
-        pay: payments,
-        nutriName: profiles.fullName,
-      })
-      .from(payments)
-      .leftJoin(profiles, eq(payments.nutritionistId, profiles.id))
-      .orderBy(desc(payments.createdAt))
 
     let rows
     if (profile.role === "client") {
-      rows = await base.where(eq(payments.clientUserId, profile.id))
+      rows = await db
+        .select()
+        .from(payments)
+        .where(eq(payments.clientUserId, profile.id))
+        .orderBy(desc(payments.createdAt))
     } else if (profile.role === "nutritionist") {
-      rows = await base.where(eq(payments.nutritionistId, profile.id))
+      rows = await db
+        .select()
+        .from(payments)
+        .where(eq(payments.nutritionistId, profile.id))
+        .orderBy(desc(payments.createdAt))
     } else {
-      rows = await base
+      rows = await db.select().from(payments).orderBy(desc(payments.createdAt))
     }
 
-    const data = rows.map((r) => ({
-      id: r.pay.id,
-      status: r.pay.status,
-      amount: r.pay.amount != null ? Number(r.pay.amount) : null,
-      proof_text: r.pay.proofText,
-      created_at: r.pay.createdAt,
-      nutritionist_id: r.pay.nutritionistId,
-      nutritionist: r.nutriName ? { full_name: r.nutriName } : null,
-    }))
-    return ok(data)
+    const profileRows = await db.select().from(profiles)
+    const byId = new Map(profileRows.map((p) => [p.id, p]))
+
+    const enriched = rows.map((r) => {
+      const client = byId.get(r.clientUserId)
+      const nutritionist = byId.get(r.nutritionistId)
+      return {
+        id: r.id,
+        status: r.status,
+        amount: r.amount != null ? Number(r.amount) : null,
+        proof_text: r.proofText,
+        payment_phone: r.paymentPhone,
+        notes: r.notes,
+        consultation_request_id: r.consultationRequestId,
+        created_at:
+          r.createdAt instanceof Date ? r.createdAt.toISOString() : String(r.createdAt ?? ""),
+        client_user_id: r.clientUserId,
+        nutritionist_id: r.nutritionistId,
+        client: client
+          ? { full_name: client.fullName, email: client.email, phone: client.phone }
+          : null,
+        nutritionist: nutritionist
+          ? { full_name: nutritionist.fullName, email: nutritionist.email, phone: nutritionist.phone }
+          : null,
+      }
+    })
+
+    return ok(enriched)
   } catch (error) {
     return fail(toActionError(error))
   }
-}
-
-/** Garante paciente ligado ao cliente para este nutricionista */
-async function ensurePatientForClient(
-  nutritionistId: string,
-  clientUserId: string,
-  consultationId?: string | null,
-) {
-  const db = getDb()
-
-  // Já existe ligação cliente ↔ nutricionista?
-  const [existing] = await db
-    .select({ id: patients.id })
-    .from(patients)
-    .where(and(eq(patients.nutritionistId, nutritionistId), eq(patients.clientUserId, clientUserId)))
-    .limit(1)
-
-  if (existing) {
-    if (consultationId) {
-      await db
-        .update(consultationRequests)
-        .set({ status: "approved", updatedAt: new Date() })
-        .where(eq(consultationRequests.id, consultationId))
-    }
-    // garantir activo
-    await db
-      .update(patients)
-      .set({ status: "active", updatedAt: new Date() })
-      .where(eq(patients.id, existing.id))
-    return existing.id
-  }
-
-  const [clientProfile] = await db
-    .select()
-    .from(profiles)
-    .where(eq(profiles.id, clientUserId))
-    .limit(1)
-
-  const name =
-    clientProfile?.fullName?.trim() ||
-    clientProfile?.email?.split("@")[0] ||
-    "Cliente"
-
-  const [created] = await db
-    .insert(patients)
-    .values({
-      nutritionistId,
-      clientUserId,
-      name,
-      email: clientProfile?.email ?? null,
-      phone: clientProfile?.phone ?? null,
-      status: "active",
-      allergies: [],
-      conditions: [],
-      notes: consultationId
-        ? `Criado automaticamente após pagamento/consulta (${consultationId})`
-        : "Criado automaticamente após confirmação de pagamento",
-    })
-    .returning({ id: patients.id })
-
-  if (!created?.id) {
-    throw new Error("Falha ao inserir paciente na base de dados.")
-  }
-
-  if (consultationId) {
-    await db
-      .update(consultationRequests)
-      .set({ status: "approved", updatedAt: new Date() })
-      .where(eq(consultationRequests.id, consultationId))
-  }
-
-  return created.id
 }
 
 export async function reviewPayment(formData: FormData) {
@@ -337,62 +393,87 @@ export async function reviewPayment(formData: FormData) {
       return fail({ code: "UNAUTHORIZED", message: "Sem permissão." })
     }
 
+    const supabase = await createClient()
     const input = parseWithSchema(reviewPaymentSchema, formDataToObject(formData))
-    const db = getDb()
 
-    const [payment] = await db.select().from(payments).where(eq(payments.id, input.payment_id)).limit(1)
-    if (!payment) return fail({ code: "NOT_FOUND", message: "Pagamento não encontrado." })
+    const { data: payment, error: fetchErr } = await supabase
+      .from("payments")
+      .select("*")
+      .eq("id", input.payment_id)
+      .maybeSingle()
 
-    if (profile.role === "nutritionist" && payment.nutritionistId !== profile.id) {
-      return fail({ code: "FORBIDDEN", message: "Este pagamento não é seu." })
+    if (fetchErr || !payment) {
+      return fail({ code: "NOT_FOUND", message: "Pagamento não encontrado." })
     }
 
-    await db
-      .update(payments)
-      .set({
+    if (profile.role === "nutritionist" && payment.nutritionist_id !== profile.id) {
+      return fail({ code: "UNAUTHORIZED", message: "Este pagamento não é seu." })
+    }
+
+    const { data, error } = await supabase
+      .from("payments")
+      .update({
         status: input.status,
-        notes: input.notes || payment.notes,
-        reviewedAt: new Date(),
-        reviewedBy: profile.id,
-        updatedAt: new Date(),
+        notes: input.notes || null,
+        reviewed_at: new Date().toISOString(),
+        reviewed_by: profile.id,
       })
-      .where(eq(payments.id, input.payment_id))
+      .eq("id", input.payment_id)
+      .select()
+      .single()
+
+    if (error) return fail({ code: "DATABASE_ERROR", message: error.message })
 
     if (input.status === "confirmed") {
-      if (payment.consultationRequestId) {
-        await db
-          .update(consultationRequests)
-          .set({ status: "payment_confirmed", updatedAt: new Date() })
-          .where(eq(consultationRequests.id, payment.consultationRequestId))
+      let consultId = payment.consultation_request_id as string | null
+
+      if (consultId) {
+        await supabase
+          .from("consultation_requests")
+          .update({ status: "paid" })
+          .eq("id", consultId)
+      } else {
+        const { data: openReq } = await supabase
+          .from("consultation_requests")
+          .select("id")
+          .eq("client_user_id", payment.client_user_id)
+          .eq("nutritionist_id", payment.nutritionist_id)
+          .in("status", ["pending", "awaiting_payment"])
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle()
+
+        if (openReq?.id) {
+          consultId = openReq.id
+          await supabase
+            .from("consultation_requests")
+            .update({ status: "paid" })
+            .eq("id", consultId)
+          await supabase
+            .from("payments")
+            .update({ consultation_request_id: consultId })
+            .eq("id", payment.id)
+        }
       }
 
-      // Obrigatório: criar / activar paciente no dashboard do nutricionista
-      const patientId = await ensurePatientForClient(
-        payment.nutritionistId,
-        payment.clientUserId,
-        payment.consultationRequestId,
-      )
-
-      // Após pagamento confirmado, a consulta fica aprovada
-      if (payment.consultationRequestId) {
-        await db
-          .update(consultationRequests)
-          .set({ status: "approved", updatedAt: new Date() })
-          .where(eq(consultationRequests.id, payment.consultationRequestId))
+      try {
+        await ensurePatientForClient(
+          supabase,
+          payment.nutritionist_id,
+          payment.client_user_id,
+          consultId,
+        )
+      } catch (e) {
+        console.error("Falha ao criar paciente após pagamento:", e)
       }
-
-      revalidatePath("/dashboard/pagamentos")
-      revalidatePath("/dashboard/patients")
-      revalidatePath(`/dashboard/patients/${patientId}`)
-      revalidatePath("/cliente")
-      revalidatePath("/cliente/consultas")
-      return ok({ id: input.payment_id, status: input.status, patient_id: patientId })
     }
 
     revalidatePath("/dashboard/pagamentos")
     revalidatePath("/dashboard/patients")
     revalidatePath("/cliente")
-    return ok({ id: input.payment_id, status: input.status })
+    revalidatePath("/cliente/consultas")
+    revalidatePath("/cliente/pagamentos")
+    return ok(data)
   } catch (error) {
     return fail(toActionError(error))
   }
@@ -405,33 +486,50 @@ export async function updateConsultationStatus(formData: FormData) {
       return fail({ code: "UNAUTHORIZED", message: "Sem permissão." })
     }
 
+    const supabase = await createClient()
     const input = parseWithSchema(updateConsultationSchema, formDataToObject(formData))
-    const db = getDb()
 
-    const [row] = await db
-      .select()
-      .from(consultationRequests)
-      .where(eq(consultationRequests.id, input.id))
-      .limit(1)
+    const { data: row, error: fetchErr } = await supabase
+      .from("consultation_requests")
+      .select("*")
+      .eq("id", input.id)
+      .maybeSingle()
 
-    if (!row) return fail({ code: "NOT_FOUND", message: "Pedido não encontrado." })
-
-    if (profile.role === "nutritionist" && row.nutritionistId !== profile.id) {
-      return fail({ code: "FORBIDDEN", message: "Este pedido não é seu." })
+    if (fetchErr || !row) {
+      return fail({ code: "NOT_FOUND", message: "Pedido não encontrado." })
     }
 
-    await db
-      .update(consultationRequests)
-      .set({
+    if (profile.role === "nutritionist" && row.nutritionist_id !== profile.id) {
+      return fail({ code: "UNAUTHORIZED", message: "Este pedido não é seu." })
+    }
+
+    if (input.status === "approved" && row.status !== "paid" && profile.role !== "super_admin") {
+      return fail({
+        code: "VALIDATION_ERROR",
+        message: "Só pode aprovar a consulta depois de confirmar o pagamento.",
+      })
+    }
+
+    const { data, error } = await supabase
+      .from("consultation_requests")
+      .update({
         status: input.status,
         notes: input.notes || row.notes,
-        updatedAt: new Date(),
       })
-      .where(eq(consultationRequests.id, input.id))
+      .eq("id", input.id)
+      .select()
+      .single()
+
+    if (error) return fail({ code: "DATABASE_ERROR", message: error.message })
 
     if (input.status === "approved") {
       try {
-        await ensurePatientForClient(row.nutritionistId, row.clientUserId, row.id)
+        await ensurePatientForClient(
+          supabase,
+          row.nutritionist_id,
+          row.client_user_id,
+          row.id,
+        )
       } catch (e) {
         console.error("Falha ao criar paciente na aprovação:", e)
       }
@@ -441,7 +539,7 @@ export async function updateConsultationStatus(formData: FormData) {
     revalidatePath("/dashboard/patients")
     revalidatePath("/cliente")
     revalidatePath("/cliente/consultas")
-    return ok({ id: input.id, status: input.status })
+    return ok(data)
   } catch (error) {
     return fail(toActionError(error))
   }
@@ -454,95 +552,49 @@ export async function listClientDietPlans() {
       return fail({ code: "UNAUTHORIZED", message: "Apenas clientes." })
     }
 
-    const db = getDb()
+    const supabase = await createClient()
 
-    const patientRows = await db
-      .select({ id: patients.id })
-      .from(patients)
-      .where(eq(patients.clientUserId, profile.id))
+    const { data: patients } = await supabase
+      .from("patients")
+      .select("id")
+      .eq("client_user_id", profile.id)
 
-    const patientIds = patientRows.map((p) => p.id)
+    const patientIds = (patients ?? []).map((p) => p.id)
     if (patientIds.length === 0) return ok([])
 
-    const plans = await db
-      .select()
-      .from(dietPlans)
-      .where(
-        and(
-          inArray(dietPlans.patientId, patientIds),
-          eq(dietPlans.isActive, true),
-          isNotNull(dietPlans.publishedToClientAt),
-        ),
-      )
-      .orderBy(desc(dietPlans.publishedToClientAt))
+    const { data, error } = await supabase
+      .from("diet_plans")
+      .select("*")
+      .in("patient_id", patientIds)
+      .eq("is_active", true)
+      .not("published_to_client_at", "is", null)
+      .order("published_to_client_at", { ascending: false })
 
+    if (error) return fail({ code: "DATABASE_ERROR", message: error.message })
+
+    const plans = data ?? []
     if (plans.length === 0) return ok([])
 
-    const nutriIds = [...new Set(plans.map((p) => p.nutritionistId).filter(Boolean))]
-    const nutris =
-      nutriIds.length > 0
-        ? await db
-            .select({
-              id: profiles.id,
-              fullName: profiles.fullName,
-              clinicName: profiles.clinicName,
-              phone: profiles.phone,
-              paymentPhone: profiles.paymentPhone,
-            })
-            .from(profiles)
-            .where(inArray(profiles.id, nutriIds))
-        : []
+    const nutriIds = [...new Set(plans.map((p) => p.nutritionist_id).filter(Boolean))]
+    const { data: nutris } = await supabase
+      .from("profiles")
+      .select("id, full_name, clinic_name, phone, payment_phone")
+      .in("id", nutriIds)
 
-    const nutriMap = new Map(
-      nutris.map((n) => [
-        n.id,
-        {
-          full_name: n.fullName,
-          clinic_name: n.clinicName,
-          phone: n.phone,
-          payment_phone: n.paymentPhone,
-        },
-      ]),
-    )
+    const nutriMap = new Map((nutris ?? []).map((n) => [n.id, n]))
 
     const withMeals = []
     for (const plan of plans) {
-      const mealRows = await db
-        .select()
-        .from(meals)
-        .where(eq(meals.dietPlanId, plan.id))
-        .orderBy(meals.sortOrder)
-
-      const mealsOut = []
-      for (const meal of mealRows) {
-        const items = await db.select().from(mealItems).where(eq(mealItems.mealId, meal.id))
-        mealsOut.push({
-          id: meal.id,
-          name: meal.name,
-          time_of_day: meal.timeOfDay,
-          sort_order: meal.sortOrder,
-          meal_items: items.map((it) => ({
-            id: it.id,
-            food_name: it.foodName,
-            quantity: it.quantity,
-            unit: it.unit,
-            kcal: it.kcal != null ? Number(it.kcal) : null,
-          })),
-        })
-      }
+      const { data: meals } = await supabase
+        .from("meals")
+        .select("*, meal_items(*)")
+        .eq("diet_plan_id", plan.id)
+        .order("sort_order")
 
       withMeals.push({
-        id: plan.id,
-        title: plan.title,
-        description: plan.description,
-        daily_kcal: plan.dailyKcal,
-        protein_g: plan.proteinG,
-        carbs_g: plan.carbsG,
-        fat_g: plan.fatG,
-        notes: plan.notes,
-        created_at: plan.createdAt,
-        meals: mealsOut,
-        nutritionist: nutriMap.get(plan.nutritionistId) ?? null,
+        ...plan,
+        meals: meals ?? [],
+        nutritionist: nutriMap.get(plan.nutritionist_id) ?? null,
       })
     }
 
