@@ -56,7 +56,22 @@ export default async function DietPlanDetailPage({ params }: { params: Promise<{
 
   let plan: PlanDetails
   try {
-    plan = (await getDietPlanById(resolved.id)) as PlanDetails
+    const raw = (await getDietPlanById(resolved.id)) as Record<string, unknown>
+    plan = {
+      id: String(raw.id),
+      title: String(raw.title ?? ""),
+      description: (raw.description as string | null) ?? null,
+      daily_kcal: (raw.daily_kcal as number | null) ?? null,
+      protein_g: (raw.protein_g as number | null) ?? null,
+      carbs_g: (raw.carbs_g as number | null) ?? null,
+      fat_g: (raw.fat_g as number | null) ?? null,
+      notes: (raw.notes as string | null) ?? null,
+      is_active: Boolean(raw.is_active),
+      published_to_client_at: (raw.published_to_client_at as string | null) ?? null,
+      updated_at: String(raw.updated_at ?? new Date().toISOString()),
+      patients: (raw.patients as PlanDetails["patients"]) ?? null,
+      meals: Array.isArray(raw.meals) ? (raw.meals as PlanDetails["meals"]) : [],
+    }
   } catch {
     notFound()
   }

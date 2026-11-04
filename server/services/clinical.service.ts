@@ -1,3 +1,4 @@
+import { createClient } from "@/lib/supabase/server"
 import { requireRole, requireViewer } from "@/server/core/auth"
 import { formDataToObject, parseWithSchema } from "@/server/core/validation"
 import {
@@ -63,15 +64,16 @@ function parseTemplateQuantity(value: string): number {
 export async function createAssessmentFromForm(patientId: string, formData: FormData) {
   const parsedPatientId = parseWithSchema(idSchema, patientId)
   const viewer = await requireRole(["nutritionist", "admin"])
+  const supabase = await createClient()
 
-  await getPatientById(viewer.userId, parsedPatientId)
+  await getPatientById(supabase, viewer.userId, parsedPatientId)
 
   const input = parseWithSchema(createAssessmentSchema, {
     ...formDataToObject(formData),
     patientId: parsedPatientId,
   })
 
-  await createAssessmentRecord({
+  await createAssessmentRecord(supabase, {
     patient_id: input.patientId,
     nutritionist_id: viewer.userId,
     assessed_at: input.assessedAt || new Date().toISOString().split("T")[0],
@@ -96,20 +98,23 @@ export async function createAssessmentFromForm(patientId: string, formData: Form
 
 export async function listAssessments() {
   const viewer = await requireViewer()
-  return listAssessmentsByTenant(viewer.userId)
+  const supabase = await createClient()
+  return listAssessmentsByTenant(supabase, viewer.userId)
 }
 
 export async function listAssessmentsForPatient(patientId: string) {
   const parsedPatientId = parseWithSchema(idSchema, patientId)
   const viewer = await requireViewer()
-  await getPatientById(viewer.userId, parsedPatientId)
-  return listAssessmentsByPatient(viewer.userId, parsedPatientId)
+  const supabase = await createClient()
+  await getPatientById(supabase, viewer.userId, parsedPatientId)
+  return listAssessmentsByPatient(supabase, viewer.userId, parsedPatientId)
 }
 
 export async function createDietPlanFromForm(patientId: string, formData: FormData) {
   const parsedPatientId = parseWithSchema(idSchema, patientId)
   const viewer = await requireRole(["nutritionist", "admin"])
-  await getPatientById(viewer.userId, parsedPatientId)
+  const supabase = await createClient()
+  await getPatientById(supabase, viewer.userId, parsedPatientId)
 
   const templateIdRaw = formData.get("templateId")
   const templateId = typeof templateIdRaw === "string" && templateIdRaw.trim().length > 0 ? templateIdRaw : null
@@ -196,6 +201,7 @@ export async function createDietPlanFromForm(patientId: string, formData: FormDa
   })
 
   const created = await createDietPlanWithMeals(
+    supabase,
     {
       patient_id: input.patientId,
       nutritionist_id: viewer.userId,
@@ -240,8 +246,9 @@ export async function createDietPlanFromForm(patientId: string, formData: FormDa
 export async function updateDietPlanFromForm(planId: string, formData: FormData) {
   const parsedPlanId = parseWithSchema(idSchema, planId)
   const viewer = await requireRole(["nutritionist", "admin"])
+  const supabase = await createClient()
 
-  const existing = await getDietPlanById(viewer.userId, parsedPlanId)
+  const existing = await getDietPlanById(supabase, viewer.userId, parsedPlanId)
   const patientId = existing.patient_id as string | null
   if (!patientId) {
     throw new Error("Diet plan is not linked to a patient")
@@ -273,6 +280,7 @@ export async function updateDietPlanFromForm(planId: string, formData: FormData)
   })
 
   await replaceDietPlanWithMeals(
+    supabase,
     viewer.userId,
     input.id,
     {
@@ -305,48 +313,234 @@ export async function updateDietPlanFromForm(planId: string, formData: FormData)
 
 export async function listDietPlans() {
   const viewer = await requireViewer()
-  return listDietPlansByTenant(viewer.userId)
+  const { getDb } = await import("@/lib/db")
+  const { dietPlans, patients } = await import("@/lib/db/schema")
+  const { eq, desc } = await import("drizzle-orm")
+
+  const db = getDb()
+  const rows = await db
+    .select({
+      id: dietPlans.id,
+      title: dietPlans.title,
+      description: dietPlans.description,
+      dailyKcal: dietPlans.dailyKcal,
+      proteinG: dietPlans.proteinG,
+      carbsG: dietPlans.carbsG,
+      fatG: dietPlans.fatG,
+      isActive: dietPlans.isActive,
+      updatedAt: dietPlans.updatedAt,
+      patientId: dietPlans.patientId,
+      patientName: patients.name,
+      patientRecordId: patients.id,
+    })
+    .from(dietPlans)
+    .leftJoin(patients, eq(dietPlans.patientId, patients.id))
+    .where(eq(dietPlans.nutritionistId, viewer.userId))
+    .orderBy(desc(dietPlans.updatedAt))
+
+  return rows.map((r) => ({
+    id: r.id,
+    title: r.title,
+    description: r.description,
+    daily_kcal: r.dailyKcal,
+    protein_g: r.proteinG,
+    carbs_g: r.carbsG,
+    fat_g: r.fatG,
+    is_active: r.isActive,
+    updated_at: r.updatedAt?.toISOString?.() ?? r.updatedAt,
+    patients: r.patientRecordId ? { id: r.patientRecordId, name: r.patientName } : null,
+  }))
 }
 
 export async function getDietPlan(planId: string) {
   const parsedPlanId = parseWithSchema(idSchema, planId)
   const viewer = await requireViewer()
-  return getDietPlanById(viewer.userId, parsedPlanId)
+  const { getDb } = await import("@/lib/db")
+  const { dietPlans, patients, meals, mealItems } = await import("@/lib/db/schema")
+  const { and, eq, asc } = await import("drizzle-orm")
+
+  const db = getDb()
+  const [row] = await db
+    .select({
+      plan: dietPlans,
+      patientName: patients.name,
+      patientEmail: patients.email,
+      patientRecordId: patients.id,
+    })
+    .from(dietPlans)
+    .leftJoin(patients, eq(dietPlans.patientId, patients.id))
+    .where(and(eq(dietPlans.id, parsedPlanId), eq(dietPlans.nutritionistId, viewer.userId)))
+    .limit(1)
+
+  if (!row) {
+    throw new Error("Plano não encontrado.")
+  }
+
+  const mealRows = await db
+    .select()
+    .from(meals)
+    .where(eq(meals.dietPlanId, parsedPlanId))
+    .orderBy(asc(meals.sortOrder))
+
+  const itemRows =
+    mealRows.length === 0
+      ? []
+      : await db.select().from(mealItems).orderBy(asc(mealItems.sortOrder))
+
+  const itemsByMeal = new Map<string, typeof itemRows>()
+  for (const item of itemRows) {
+    if (!mealRows.some((m) => m.id === item.mealId)) continue
+    const list = itemsByMeal.get(item.mealId) ?? []
+    list.push(item)
+    itemsByMeal.set(item.mealId, list)
+  }
+
+  const p = row.plan
+  const toIso = (v: Date | string | null | undefined) => {
+    if (!v) return null
+    if (v instanceof Date) return v.toISOString()
+    return String(v)
+  }
+
+  return {
+    id: p.id,
+    title: p.title,
+    description: p.description,
+    daily_kcal: p.dailyKcal,
+    protein_g: p.proteinG,
+    carbs_g: p.carbsG,
+    fat_g: p.fatG,
+    notes: p.notes,
+    is_active: p.isActive,
+    patient_id: p.patientId,
+    nutritionist_id: p.nutritionistId,
+    published_to_client_at: toIso(p.publishedToClientAt),
+    updated_at: toIso(p.updatedAt) ?? new Date().toISOString(),
+    created_at: toIso(p.createdAt),
+    patients: row.patientRecordId
+      ? { id: row.patientRecordId, name: row.patientName, email: row.patientEmail }
+      : null,
+    meals: mealRows.map((m) => ({
+      id: m.id,
+      name: m.name,
+      time_of_day: m.timeOfDay,
+      meal_items: (itemsByMeal.get(m.id) ?? []).map((it) => ({
+        id: it.id,
+        food_name: it.foodName,
+        quantity: it.quantity ?? "",
+        unit: it.unit,
+        kcal: it.kcal != null ? Number(it.kcal) : null,
+        protein_g: it.proteinG != null ? Number(it.proteinG) : null,
+        carbs_g: it.carbsG != null ? Number(it.carbsG) : null,
+        fat_g: it.fatG != null ? Number(it.fatG) : null,
+      })),
+    })),
+  }
 }
 
 export async function toggleDietPlan(planId: string, isActive: boolean) {
   const parsedPlanId = parseWithSchema(idSchema, planId)
   const parsedIsActive = parseWithSchema(z.boolean(), isActive)
-  const viewer = await requireRole(["nutritionist", "admin"])
-  await toggleDietPlanActiveState( viewer.userId, parsedPlanId, parsedIsActive)
+  const viewer = await requireRole(["nutritionist", "super_admin"])
+  const { getDb } = await import("@/lib/db")
+  const { dietPlans } = await import("@/lib/db/schema")
+  const { and, eq } = await import("drizzle-orm")
+
+  const db = getDb()
+  await db
+    .update(dietPlans)
+    .set({ isActive: parsedIsActive, updatedAt: new Date() })
+    .where(and(eq(dietPlans.id, parsedPlanId), eq(dietPlans.nutritionistId, viewer.userId)))
 }
 
 export async function removeDietPlan(planId: string) {
   const parsedPlanId = parseWithSchema(idSchema, planId)
-  const viewer = await requireRole(["nutritionist", "admin"])
-  await deleteDietPlan( viewer.userId, parsedPlanId)
+  const viewer = await requireRole(["nutritionist", "super_admin"])
+  const { getDb } = await import("@/lib/db")
+  const { dietPlans } = await import("@/lib/db/schema")
+  const { and, eq } = await import("drizzle-orm")
+
+  const db = getDb()
+  await db
+    .delete(dietPlans)
+    .where(and(eq(dietPlans.id, parsedPlanId), eq(dietPlans.nutritionistId, viewer.userId)))
 }
 
 export async function listAppointments() {
   const viewer = await requireViewer()
-  return listAppointmentsByTenant(viewer.userId)
+  const { getDb } = await import("@/lib/db")
+  const { appointments, patients } = await import("@/lib/db/schema")
+  const { eq, asc } = await import("drizzle-orm")
+
+  const db = getDb()
+  const rows = await db
+    .select({
+      id: appointments.id,
+      patientId: appointments.patientId,
+      nutritionistId: appointments.nutritionistId,
+      scheduledAt: appointments.scheduledAt,
+      durationMin: appointments.durationMin,
+      type: appointments.type,
+      status: appointments.status,
+      notes: appointments.notes,
+      patientName: patients.name,
+      patientRecordId: patients.id,
+    })
+    .from(appointments)
+    .leftJoin(patients, eq(appointments.patientId, patients.id))
+    .where(eq(appointments.nutritionistId, viewer.userId))
+    .orderBy(asc(appointments.scheduledAt))
+
+  return rows.map((r) => {
+    const scheduled =
+      r.scheduledAt instanceof Date
+        ? r.scheduledAt.toISOString()
+        : String(r.scheduledAt ?? "")
+    return {
+      id: r.id,
+      patient_id: r.patientId,
+      nutritionist_id: r.nutritionistId,
+      title: (r.type || r.notes || "Consulta") as string,
+      scheduled_at: scheduled,
+      duration_minutes: r.durationMin ?? 60,
+      status: r.status as "scheduled" | "completed" | "cancelled" | "no_show",
+      notes: r.notes,
+      patients: r.patientRecordId ? { id: r.patientRecordId, name: r.patientName } : null,
+    }
+  })
 }
 
 export async function createAppointmentFromForm(formData: FormData) {
-  const viewer = await requireRole(["nutritionist", "admin"])
+  const viewer = await requireRole(["nutritionist", "super_admin"])
+  const { getDb } = await import("@/lib/db")
+  const { appointments, patients } = await import("@/lib/db/schema")
+  const { and, eq } = await import("drizzle-orm")
 
   const input = parseWithSchema(createAppointmentSchema, formDataToObject(formData))
-  await getPatientById(viewer.userId, input.patientId)
+  const db = getDb()
 
-  const created = await createAppointmentRecord({
-    patient_id: input.patientId,
-    nutritionist_id: viewer.userId,
-    title: input.title,
-    scheduled_at: toIsoDateTime(input.scheduledAt),
-    duration_minutes: input.durationMinutes ?? 60,
-    status: "scheduled",
-    notes: normalizeText(input.notes),
-  })
+  const [patient] = await db
+    .select({ id: patients.id })
+    .from(patients)
+    .where(and(eq(patients.id, input.patientId), eq(patients.nutritionistId, viewer.userId)))
+    .limit(1)
+
+  if (!patient) {
+    throw new Error("Paciente não encontrado.")
+  }
+
+  const [created] = await db
+    .insert(appointments)
+    .values({
+      patientId: input.patientId,
+      nutritionistId: viewer.userId,
+      type: input.title,
+      scheduledAt: new Date(toIsoDateTime(input.scheduledAt)),
+      durationMin: input.durationMinutes ?? 60,
+      status: "scheduled",
+      notes: normalizeText(input.notes),
+    })
+    .returning({ id: appointments.id })
 
   return {
     id: created.id,
@@ -356,7 +550,8 @@ export async function createAppointmentFromForm(formData: FormData) {
 
 export async function getDashboardMetrics() {
   const viewer = await requireViewer()
-  const counts = await getDashboardCounts(viewer.userId)
+  const supabase = await createClient()
+  const counts = await getDashboardCounts(supabase, viewer.userId)
 
   const now = new Date()
   const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
@@ -376,9 +571,10 @@ export async function getDashboardMetrics() {
 
 export async function persistAiDraft(input: AiDraftRequestInput & { generatedContent: string }) {
   const viewer = await requireRole(["nutritionist", "admin", "assistant"])
+  const supabase = await createClient()
 
   if (input.patientId) {
-    await getPatientById(viewer.userId, input.patientId)
+    await getPatientById(supabase, viewer.userId, input.patientId)
   }
 
   const parsed = parseWithSchema(aiDraftRequestSchema, {
@@ -388,7 +584,7 @@ export async function persistAiDraft(input: AiDraftRequestInput & { generatedCon
     messages: input.messages,
   })
 
-  const draftMatch = await findAiDraft( viewer.userId, parsed.patientId ?? null, parsed.tool)
+  const draftMatch = await findAiDraft(supabase, viewer.userId, parsed.patientId ?? null, parsed.tool)
 
   const metadata = {
     messages: parsed.messages ?? [],
@@ -398,12 +594,12 @@ export async function persistAiDraft(input: AiDraftRequestInput & { generatedCon
   let draftId: string
   if (draftMatch) {
     draftId = draftMatch.id
-    await updateAiDraft( viewer.userId, draftId, {
+    await updateAiDraft(supabase, viewer.userId, draftId, {
       latest_content: input.generatedContent,
       metadata,
     })
   } else {
-    const created = await createAiDraft( {
+    const created = await createAiDraft(supabase, {
       nutritionist_id: viewer.userId,
       patient_id: parsed.patientId ?? null,
       tool: parsed.tool,
@@ -414,7 +610,7 @@ export async function persistAiDraft(input: AiDraftRequestInput & { generatedCon
     draftId = created.id
   }
 
-  await createAiDraftVersion( {
+  await createAiDraftVersion(supabase, {
     draft_id: draftId,
     nutritionist_id: viewer.userId,
     tool: parsed.tool,
