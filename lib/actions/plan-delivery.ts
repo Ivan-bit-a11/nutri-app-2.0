@@ -210,7 +210,7 @@ export async function getPatientClientLink(patientId: string) {
     }
 
     if (!patient.clientUserId) {
-      return ok({ linked: false, client: null })
+      return ok({ linked: false, client: null, paymentConfirmed: false })
     }
 
     const [client] = await db
@@ -223,11 +223,41 @@ export async function getPatientClientLink(patientId: string) {
       .where(eq(profiles.id, patient.clientUserId))
       .limit(1)
 
+    // Pagamento confirmado ou consulta aprovada entre este cliente e o nutricionista
+    const [paid] = await db
+      .select({ id: payments.id })
+      .from(payments)
+      .where(
+        and(
+          eq(payments.clientUserId, patient.clientUserId),
+          eq(payments.nutritionistId, patient.nutritionistId),
+          eq(payments.status, "confirmed"),
+        ),
+      )
+      .limit(1)
+
+    let paymentConfirmed = !!paid
+    if (!paymentConfirmed) {
+      const [approved] = await db
+        .select({ id: consultationRequests.id })
+        .from(consultationRequests)
+        .where(
+          and(
+            eq(consultationRequests.clientUserId, patient.clientUserId),
+            eq(consultationRequests.nutritionistId, patient.nutritionistId),
+            eq(consultationRequests.status, "approved"),
+          ),
+        )
+        .limit(1)
+      paymentConfirmed = !!approved
+    }
+
     return ok({
       linked: true,
       client: client
         ? { id: client.id, full_name: client.fullName, email: client.email }
         : null,
+      paymentConfirmed,
     })
   } catch (error) {
     return fail(toActionError(error))
