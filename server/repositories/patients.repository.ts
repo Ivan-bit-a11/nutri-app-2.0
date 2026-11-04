@@ -3,6 +3,12 @@ import { getDb } from "@/lib/db"
 import { patients, patientNotes, assessments, dietPlans } from "@/lib/db/schema"
 import { databaseError, notFound } from "@/server/core/errors"
 
+function num(v: unknown): number | null {
+  if (v === null || v === undefined || v === "") return null
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
+
 function mapPatient(row: typeof patients.$inferSelect) {
   return {
     id: row.id,
@@ -25,8 +31,58 @@ function mapPatient(row: typeof patients.$inferSelect) {
     emergency_contact_name: row.emergencyContactName,
     emergency_contact_phone: row.emergencyContactPhone,
     notes: row.notes,
-    created_at: row.createdAt,
-    updated_at: row.updatedAt,
+    created_at: row.createdAt instanceof Date ? row.createdAt.toISOString() : String(row.createdAt),
+    updated_at: row.updatedAt instanceof Date ? row.updatedAt.toISOString() : String(row.updatedAt),
+  }
+}
+
+function mapAssessment(row: typeof assessments.$inferSelect) {
+  return {
+    id: row.id,
+    patient_id: row.patientId,
+    nutritionist_id: row.nutritionistId,
+    assessed_at:
+      row.assessedAt instanceof Date ? row.assessedAt.toISOString() : String(row.assessedAt),
+    weight_kg: num(row.weightKg),
+    height_cm: num(row.heightCm),
+    bmi: num(row.bmi),
+    body_fat_pct: num(row.bodyFatPct),
+    fat_mass_kg: num(row.fatMassKg),
+    lean_mass_kg: num(row.muscleMassKg),
+    waist_cm: num(row.waistCm),
+    hip_cm: num(row.hipCm),
+    notes: row.notes,
+    created_at: row.createdAt instanceof Date ? row.createdAt.toISOString() : String(row.createdAt),
+    updated_at: row.updatedAt instanceof Date ? row.updatedAt.toISOString() : String(row.updatedAt),
+  }
+}
+
+function mapDietPlan(row: typeof dietPlans.$inferSelect) {
+  return {
+    id: row.id,
+    patient_id: row.patientId,
+    nutritionist_id: row.nutritionistId,
+    title: row.title,
+    description: row.description,
+    daily_kcal: row.dailyKcal,
+    protein_g: row.proteinG,
+    carbs_g: row.carbsG,
+    fat_g: row.fatG,
+    notes: row.notes,
+    is_active: row.isActive,
+    created_at: row.createdAt instanceof Date ? row.createdAt.toISOString() : String(row.createdAt),
+    updated_at: row.updatedAt instanceof Date ? row.updatedAt.toISOString() : String(row.updatedAt),
+  }
+}
+
+function mapNote(row: typeof patientNotes.$inferSelect) {
+  return {
+    id: row.id,
+    patient_id: row.patientId,
+    nutritionist_id: row.nutritionistId,
+    content: row.content,
+    created_at: row.createdAt instanceof Date ? row.createdAt.toISOString() : String(row.createdAt),
+    updated_at: row.updatedAt instanceof Date ? row.updatedAt.toISOString() : String(row.updatedAt),
   }
 }
 
@@ -64,15 +120,34 @@ export async function getPatientWithDetails(nutritionistId: string, patientId: s
   const patient = await getPatientById(nutritionistId, patientId)
   const db = getDb()
   const [notes, asses, plans] = await Promise.all([
-    db.select().from(patientNotes).where(eq(patientNotes.patientId, patientId)).orderBy(desc(patientNotes.createdAt)),
-    db.select().from(assessments).where(eq(assessments.patientId, patientId)).orderBy(desc(assessments.assessedAt)),
-    db.select().from(dietPlans).where(eq(dietPlans.patientId, patientId)).orderBy(desc(dietPlans.createdAt)),
+    db
+      .select()
+      .from(patientNotes)
+      .where(eq(patientNotes.patientId, patientId))
+      .orderBy(desc(patientNotes.createdAt)),
+    db
+      .select()
+      .from(assessments)
+      .where(eq(assessments.patientId, patientId))
+      .orderBy(desc(assessments.assessedAt)),
+    db
+      .select()
+      .from(dietPlans)
+      .where(eq(dietPlans.patientId, patientId))
+      .orderBy(desc(dietPlans.createdAt)),
   ])
   return {
     ...patient,
-    patient_notes: notes,
-    assessments: asses,
-    diet_plans: plans,
+    patient_notes: notes.map(mapNote),
+    assessments: asses.map(mapAssessment),
+    diet_plans: plans.map(mapDietPlan),
+    appointments: [] as Array<{
+      id: string
+      title: string
+      scheduled_at: string
+      status: string
+      duration_minutes: number
+    }>,
   }
 }
 
@@ -166,3 +241,5 @@ export async function insertPatientNote(
     throw databaseError("Não foi possível guardar a nota", error)
   }
 }
+
+export type PatientRecord = ReturnType<typeof mapPatient>

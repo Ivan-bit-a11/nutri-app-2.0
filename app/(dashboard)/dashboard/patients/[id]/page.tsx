@@ -90,14 +90,14 @@ export default async function PatientDetailPage({ params }: { params: Promise<{ 
     notFound()
   }
 
-  const assessments = (patient.assessments ?? []) as AssessmentRow[]
-  const dietPlans = (patient.diet_plans ?? []) as DietPlanRow[]
+  const assessments = (patient.assessments ?? []) as unknown as AssessmentRow[]
+  const dietPlans = (patient.diet_plans ?? []) as unknown as DietPlanRow[]
   const linkRes = await getPatientClientLink(resolved.id)
   const clientLink = linkRes.success
     ? { client: linkRes.data.client, paymentConfirmed: linkRes.data.paymentConfirmed }
     : { client: null, paymentConfirmed: false }
-  const appointments = (patient.appointments ?? []) as AppointmentRow[]
-  const notes = (patient.patient_notes ?? []) as NoteRow[]
+  const appointments = ((patient as { appointments?: AppointmentRow[] }).appointments ?? []) as AppointmentRow[]
+  const notes = (patient.patient_notes ?? []) as unknown as NoteRow[]
 
   const latestAssessment = assessments[0]
 
