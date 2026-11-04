@@ -34,7 +34,24 @@ function statusBadge(status: AppointmentItem["status"]) {
 
 export default async function AppointmentsPage() {
   const locale = await getRequestLocale()
-  const appointments = (await getAllAppointments()) as AppointmentItem[]
+  const raw = await getAllAppointments()
+  const appointments: AppointmentItem[] = (raw as Array<Record<string, unknown>>).map((item) => {
+    const scheduledRaw = item.scheduled_at ?? item.scheduledAt
+    const scheduled_at =
+      scheduledRaw instanceof Date
+        ? scheduledRaw.toISOString()
+        : String(scheduledRaw ?? "")
+    const title = String(item.title ?? item.type ?? item.notes ?? "Consulta")
+    const status = String(item.status ?? "scheduled") as AppointmentItem["status"]
+    return {
+      id: String(item.id),
+      title,
+      scheduled_at,
+      status,
+      duration_minutes: Number(item.duration_minutes ?? item.durationMin ?? 60),
+      patients: (item.patients as AppointmentItem["patients"]) ?? null,
+    }
+  })
   const upcoming = appointments.filter((item) => item.status === "scheduled").length
 
   return (
