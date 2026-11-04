@@ -1,0 +1,19 @@
+{
+  "appName": "NutriFlow AI",
+  "language": "Idioma",
+  "search": "Buscar",
+  "save": "Guardar",
+  "cancel": "Cancelar",
+  "settings": "Configuraciones",
+  "signOut": "Salir",
+  "user": "Usuario",
+  "openMenu": "Abrir menu",
+  "expandSidebar": "Expandir menu lateral",
+  "collapseSidebar": "Colapsar menu lateral",
+  "toggleTheme": "Cambiar tema",
+  "notifications": "Notificaciones",
+  "emptyNotifications": "Sin notificaciones pendientes",
+  "loading": "Cargando...",
+  "empty": "Sin datos",
+  "error": "Ocurrio un error"
+}

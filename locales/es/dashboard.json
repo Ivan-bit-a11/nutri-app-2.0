@@ -1,0 +1,24 @@
+{
+  "title": "Panel",
+  "patients": "Pacientes",
+  "appointments": "Citas",
+  "assessments": "Evaluaciones",
+  "dietPlans": "Planes alimentarios",
+  "reports": "Reportes",
+  "nav": {
+    "overview": "Vista general",
+    "dashboard": "Panel",
+    "clinical": "Clinico",
+    "patients": "Pacientes",
+    "appointments": "Citas",
+    "assessments": "Evaluaciones",
+    "nutrition": "Nutricion",
+    "plans": "Planes",
+    "templates": "Plantillas",
+    "ai": "AI Copilot",
+    "management": "Gestion",
+    "messages": "Mensajes",
+    "documents": "Documentos",
+    "reports": "Reportes"
+  }
+}

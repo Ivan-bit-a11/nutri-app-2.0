@@ -1,0 +1,24 @@
+{
+  "title": "Dashboard",
+  "patients": "Pacientes",
+  "appointments": "Consultas",
+  "assessments": "Avaliacoes",
+  "dietPlans": "Planos alimentares",
+  "reports": "Relatorios",
+  "nav": {
+    "overview": "Visao Geral",
+    "dashboard": "Dashboard",
+    "clinical": "Clinico",
+    "patients": "Pacientes",
+    "appointments": "Consultas",
+    "assessments": "Avaliacoes",
+    "nutrition": "Nutricao",
+    "plans": "Planos",
+    "templates": "Modelos",
+    "ai": "AI Copilot",
+    "management": "Gestao",
+    "messages": "Mensagens",
+    "documents": "Documentos",
+    "reports": "Relatorios"
+  }
+}
